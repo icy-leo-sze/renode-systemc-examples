@@ -26,6 +26,20 @@ REQUIRED_FIELDS = (
 
 FLOAT_FIELDS = ("start_time_ns", "delay_ns", "end_time_ns")
 INT_FIELDS = ("data_length", "decoded_port")
+DEDUP_IDENTICAL_FIELDS = (
+    "initiator_id",
+    "target_id",
+    "command",
+    "address",
+    "masked_address",
+    "data",
+    "start_time_ns",
+    "delay_ns",
+    "end_time_ns",
+    "decoded_port",
+    "data_length",
+    "response_status",
+)
 
 
 def parse_args():
@@ -37,6 +51,45 @@ def parse_args():
         default=DEFAULT_TRACE,
         type=Path,
         help=f"CSV trace path. Defaults to {DEFAULT_TRACE}",
+    )
+    parser.add_argument(
+        "--initiator",
+        action="append",
+        default=[],
+        help="Keep only rows with this initiator_id. Can be repeated.",
+    )
+    parser.add_argument(
+        "--exclude-initiator",
+        action="append",
+        default=[],
+        help="Exclude rows with this initiator_id. Can be repeated.",
+    )
+    parser.add_argument(
+        "--target",
+        action="append",
+        default=[],
+        help="Keep only rows with this target_id. Can be repeated.",
+    )
+    parser.add_argument(
+        "--command",
+        action="append",
+        default=[],
+        help="Keep only rows with this command, e.g. READ or WRITE. Can be repeated.",
+    )
+    parser.add_argument(
+        "--max-start-time-ns",
+        type=float,
+        help="Keep only rows with start_time_ns <= this value.",
+    )
+    parser.add_argument(
+        "--min-start-time-ns",
+        type=float,
+        help="Keep only rows with start_time_ns >= this value.",
+    )
+    parser.add_argument(
+        "--dedup-identical",
+        action="store_true",
+        help="Remove fully identical transaction rows before filtering and reporting.",
     )
     return parser.parse_args()
 
@@ -117,6 +170,72 @@ def format_hex(value):
     return f"0x{value:016X}"
 
 
+def filter_rows(rows, args):
+    initiators = {str(value) for value in args.initiator}
+    excluded_initiators = {str(value) for value in args.exclude_initiator}
+    targets = {str(value) for value in args.target}
+    commands = {str(value).upper() for value in args.command}
+
+    filtered = []
+    for row in rows:
+        start_time = row.get("start_time_ns")
+
+        if initiators and row.get("initiator_id") not in initiators:
+            continue
+        if excluded_initiators and row.get("initiator_id") in excluded_initiators:
+            continue
+        if targets and row.get("target_id") not in targets:
+            continue
+        if commands and str(row.get("command", "")).upper() not in commands:
+            continue
+        if args.min_start_time_ns is not None and (
+            start_time is None or start_time < args.min_start_time_ns
+        ):
+            continue
+        if args.max_start_time_ns is not None and (
+            start_time is None or start_time > args.max_start_time_ns
+        ):
+            continue
+
+        filtered.append(row)
+
+    return filtered
+
+
+def dedup_identical_rows(rows):
+    seen = set()
+    deduplicated = []
+    for row in rows:
+        key = tuple(row.get(field) for field in DEDUP_IDENTICAL_FIELDS)
+        if key in seen:
+            continue
+
+        seen.add(key)
+        deduplicated.append(row)
+
+    return deduplicated
+
+
+def active_filters(args):
+    filters = []
+    if args.initiator:
+        filters.append("initiator_id in [" + ", ".join(args.initiator) + "]")
+    if args.exclude_initiator:
+        filters.append(
+            "initiator_id not in [" + ", ".join(args.exclude_initiator) + "]"
+        )
+    if args.target:
+        filters.append("target_id in [" + ", ".join(args.target) + "]")
+    if args.command:
+        filters.append("command in [" + ", ".join(value.upper() for value in args.command) + "]")
+    if args.min_start_time_ns is not None:
+        filters.append(f"start_time_ns >= {args.min_start_time_ns:g}")
+    if args.max_start_time_ns is not None:
+        filters.append(f"start_time_ns <= {args.max_start_time_ns:g}")
+
+    return "; ".join(filters) if filters else "none"
+
+
 def summarize_numeric(rows, group_keys):
     groups = defaultdict(list)
     for row in rows:
@@ -163,7 +282,7 @@ def print_table(title, headers, rows):
         print("  ".join(value.ljust(widths[index]) for index, value in enumerate(row)))
 
 
-def print_overview(rows):
+def print_overview(rows, raw_count, analyzed_count, deduplicated_count, filters):
     starts = [row["start_time_ns"] for row in rows if row["start_time_ns"] is not None]
     ends = [row["end_time_ns"] for row in rows if row["end_time_ns"] is not None]
     delays = [row["delay_ns"] for row in rows if row["delay_ns"] is not None]
@@ -177,6 +296,11 @@ def print_overview(rows):
         "Overview",
         ("metric", "value"),
         (
+            ("raw_transactions", raw_count),
+            ("analyzed_transactions", analyzed_count),
+            ("deduplicated_transactions", deduplicated_count),
+            ("filtered_transactions", len(rows)),
+            ("active_filters", filters),
             ("total_transactions", len(rows)),
             ("first_start_time_ns", format_number(first_start)),
             ("last_end_time_ns", format_number(last_end)),
@@ -344,11 +468,24 @@ def timeline_sort_key(row):
 
 def main():
     args = parse_args()
-    rows = load_rows(args.trace)
+    raw_rows = load_rows(args.trace)
+    analyzed_rows = dedup_identical_rows(raw_rows) if args.dedup_identical else raw_rows
+    deduplicated_count = len(raw_rows) - len(analyzed_rows)
+    filters = active_filters(args)
+    rows = filter_rows(analyzed_rows, args)
+    if not rows:
+        print(
+            "error: no transactions remain after filtering. "
+            f"raw_transactions={len(raw_rows)} "
+            f"analyzed_transactions={len(analyzed_rows)} active_filters={filters}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
     sorted_rows = sorted(rows, key=timeline_sort_key)
 
     print(f"Trace: {args.trace}")
-    print_overview(rows)
+    print_overview(rows, len(raw_rows), len(analyzed_rows), deduplicated_count, filters)
     print_table(
         "By initiator_id",
         ("initiator_id", "count", "avg_delay_ns", "min_delay_ns", "max_delay_ns"),
