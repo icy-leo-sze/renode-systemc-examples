@@ -48,6 +48,8 @@ public:
   , const unsigned int  ID                       ///< initiator ID
   , sc_dt::uint64       base_address_1           ///< first base address
   , sc_dt::uint64       base_address_2           ///< second base address
+  , const traffic_generator::workload_config& workload =
+        traffic_generator::workload_config()     ///< traffic workload knobs
   );
 
   void                                                                                          

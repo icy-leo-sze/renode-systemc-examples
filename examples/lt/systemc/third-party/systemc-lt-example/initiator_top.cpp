@@ -47,6 +47,7 @@ initiator_top::initiator_top
 , const unsigned int    ID
 , sc_dt::uint64         base_address_1
 , sc_dt::uint64         base_address_2
+, const traffic_generator::workload_config& workload
 ) 
   :sc_module           (name) 	         // module instance name
   ,top_initiator_socket                  // Init the socket
@@ -62,6 +63,7 @@ initiator_top::initiator_top
     ,base_address_1                      // first base address
     ,base_address_2                      // second base address
     ,4
+    ,workload                            // workload knobs
     )
 
 {
@@ -108,5 +110,4 @@ initiator_top::nb_transport_bw
 
   return tlm::TLM_COMPLETED;  
 } // end nb_transport_bw
-
 

@@ -2,11 +2,11 @@
 
 ## What This Lab Is
 
-`examples/lt` 现在是 Renode/SystemC LT 示例之上的第一阶段 SystemC/TLM SoC performance modeling lab。
+`examples/lt` 现在是 Renode/SystemC LT 示例之上的 SystemC/TLM SoC performance modeling lab。
 
-当前阶段的目标很窄：在不改变原有 TLM routing、target 行为和 Renode 接入方式的前提下，记录每次 blocking `b_transport` transaction 的 target-side annotated delay，并用 CSV 与 Python 报告工具观察 initiator、target、command 和 response status 维度的延迟分布。
+当前阶段已经加入最小 target `busy_until` queueing model：在不改变原有地址 decode、target memory 行为和 Renode 接入方式的前提下，`SimpleBusLT` 会对访问同一 target port 的 blocking `b_transport` transaction 做 target-level serialization，并记录 queue delay、target service delay 和 total delay。
 
-这不是完整 NoC 或互连性能模型；它是一个可运行、可回归、可继续演进的测量基线。
+这仍然不是完整 NoC 或真实互连模型；它是一个可运行、可回归、可继续演进的最小 bus contention / target serialization 基线。
 
 ## Architecture
 
@@ -78,13 +78,19 @@ examples/lt/results/latency_trace.csv
 - `command`: TLM command，当前输出 `READ`、`WRITE` 或 `OTHER`。
 - `address`: bus 改写前的原始 transaction address。
 - `data`: payload 前 4 bytes 按 `uint32_t` 解析；不可用时为 `0`。
-- `start_time_ns`: transaction 到达 `SimpleBusLT::initiatorBTransport()` 时的 SystemC timestamp。
-- `delay_ns`: target `b_transport` 调用对 `sc_core::sc_time& t` 增加的本次 annotated delay。
+- `start_time_ns`: transaction 的有效 bus 到达时间，即 `sc_time_stamp() + incoming t`。
+- `delay_ns`: initiator 本次可见的总 delay；Phase 3 中等同于 `total_delay_ns`。
 - `end_time_ns`: `start_time_ns + delay_ns`。
 - `decoded_port`: `SimpleBusLT` 从原始 address 解码出的 target port。
 - `masked_address`: `trans.set_address(...)` 后传给 target 的地址。
 - `data_length`: `trans.get_data_length()`。
 - `response_status`: target `b_transport` 返回后的 `trans.get_response_string()`。
+- `request_time_ns`: `SimpleBusLT::initiatorBTransport()` 被调用时的原始 `sc_time_stamp()`。
+- `bus_grant_time_ns`: 根据 target `busy_until` 计算出的服务开始时间。
+- `queue_delay_ns`: bus/contention model 引入的等待时间。
+- `target_service_delay_ns`: target `b_transport` 本身增加的 delay。
+- `total_delay_ns`: `queue_delay_ns + target_service_delay_ns`。
+- `target_busy_until_ns`: 本次 transaction 后该 target port 的下一次可服务时间。
 
 ## How To Build And Run
 
@@ -103,6 +109,7 @@ mkdir -p bin
 ln -sf ../build/lt bin/lt
 
 cd /home/leo/renode-systemc-examples
+rm -f examples/lt/results/latency_trace.csv
 renode-test examples/lt/lt.robot
 
 python3 examples/lt/tools/analyze_latency.py \
@@ -152,13 +159,18 @@ python3 examples/lt/tools/analyze_latency.py \
   --exclude-initiator 9002
 ```
 
-报告包含 overview、按 initiator/target/command 的 delay summary、response status 统计、decoded port 统计、address range summary、data length summary、sanity checks，以及 first/last timeline rows。
+报告包含 overview、按 initiator/target/command 的 delay summary、queue delay summary、service/total delay breakdown、response status 统计、decoded port 统计、address range summary、data length summary、sanity checks，以及 first/last timeline rows。
 
 ## Current Modeling Meaning
 
-当前 `delay_ns` 是 target-side annotated delay。它来自 target accept delay 与 memory read/write response delay 的组合，不包含 bus arbitration、contention、queueing 或 bandwidth saturation。
+当前模型由两部分组成：
 
-当前配置下的 nominal delay：
+- `target_service_delay_ns`: target-side annotated delay，来自 target accept delay 与 memory read/write response delay 的组合。
+- `queue_delay_ns`: `SimpleBusLT` 中每个 target port 的 `busy_until` 状态产生的最小排队等待。
+
+`delay_ns` 和 `total_delay_ns` 表示 initiator 本次可见的总 delay，即 `queue_delay_ns + target_service_delay_ns`。
+
+当前配置下的 nominal target service delay：
 
 | target_id | command | delay |
 | --- | --- | --- |
@@ -172,23 +184,23 @@ python3 examples/lt/tools/analyze_latency.py \
 - target 201: accept `20 ns` + read `100 ns` / write `60 ns`
 - target 202: accept `10 ns` + read `50 ns` / write `30 ns`
 
-Initiator 101 和 102 当前是对称配置：它们使用相同的 base address 参数，通过同一个 `SimpleBusLT` 访问相同两个 target。当前模型不会因为 101/102 同时访问同一 target 而自动产生排队等待。
+Initiator 101 和 102 当前是对称配置：它们使用相同的 base address 参数，通过同一个 `SimpleBusLT` 访问相同两个 target。Phase 3 的最小模型会让访问同一 target port 的 transaction 按 `busy_until` 串行化，因此可以在 trace 中看到由 target serialization 产生的 `queue_delay_ns`。
 
 ## Current Limitations
 
 当前还没有实现：
 
-- arbitration model
-- contention model
-- queueing latency
+- configurable arbitration policy
+- full NoC contention model
+- multi-stage queueing model
 - bandwidth saturation
 - outstanding transaction modeling
 - AT/non-blocking timing path analysis
 
-因此，当前报告适合验证 transaction 路径、target delay 配置、Renode bridge 接入和 workload 分离；不适合直接解释真实 SoC interconnect 的拥塞行为。
+因此，当前报告适合验证 transaction 路径、target delay 配置、Renode bridge 接入、workload 分离，以及最小 target serialization 对 queue delay 的影响；不适合直接解释真实 SoC interconnect 的复杂拥塞行为。
 
 ## Suggested Next Phase
 
-Phase 3 建议在 `SimpleBusLT` 中加入最小 bus arbitration / queueing model。
+Phase 4 建议把当前 `busy_until` 模型扩展为可配置 arbitration / bandwidth model。
 
-目标是观察两个 initiator 访问同一 target 时的排队等待、service time、head-of-line blocking 和 tail latency。第一版可以保持 blocking LT 接口不变，只在 `SimpleBusLT::initiatorBTransport()` 内维护每个 target port 的 next-available time，并把 queueing delay 作为额外 annotated delay 写入 trace。
+目标是在保持 blocking LT 路径可回归的前提下，引入更明确的 arbitration policy、每 target/service bandwidth 参数，以及对 head-of-line blocking 和 tail latency 的更细粒度统计。

@@ -18,6 +18,21 @@
  *****************************************************************************/
 #include "top.h"
 
+namespace {
+traffic_generator::workload_config make_workload_config(
+    sc_core::sc_time initiator_start_offset) {
+  traffic_generator::workload_config config;
+  config.transaction_count = 64;
+  config.address_stride = 4;
+  config.target_pattern_mode =
+      traffic_generator::target_pattern::current_default;
+  config.read_write_mode_setting =
+      traffic_generator::read_write_mode::write_then_read;
+  config.initiator_start_offset = initiator_start_offset;
+  return config;
+}
+} // namespace
+
 top::top(sc_core::sc_module_name name, const char *address, const char *port)
     : sc_core::sc_module(name), m_bus("m_bus"),
       m_at_and_lt_target_1("m_at_and_lt_target_1", 201, "memory_socket_1",
@@ -29,9 +44,11 @@ top::top(sc_core::sc_module_name name, const char *address, const char *port)
                     sc_core::sc_time(50, sc_core::SC_NS),
                     sc_core::sc_time(30, sc_core::SC_NS)),
       m_initiator_1("m_initiator_1", 101, 0x0000000000000000,
-                    0x0000000010000000),
+                    0x0000000010000000,
+                    make_workload_config(sc_core::SC_ZERO_TIME)),
       m_initiator_2("m_initiator_2", 102, 0x0000000000000000,
-                    0x0000000010000000),
+                    0x0000000010000000,
+                    make_workload_config(sc_core::SC_ZERO_TIME)),
       m_renode_bridge("m_renode_bridge", address, port) {
   m_initiator_1.top_initiator_socket(m_bus.target_socket[0]);
   m_initiator_2.top_initiator_socket(m_bus.target_socket[1]);

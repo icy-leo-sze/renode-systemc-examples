@@ -62,6 +62,13 @@ DEDUP_IDENTICAL_FIELDS = (
     "total_delay_ns",
     "target_busy_until_ns",
 )
+WORKLOAD_FIELDS = (
+    "transaction_count",
+    "address_stride",
+    "target_pattern",
+    "read_write_mode",
+    "initiator_start_offset_ns",
+)
 
 
 def parse_args():
@@ -394,6 +401,28 @@ def print_contention_summary(rows):
     )
 
 
+def print_workload_config_hint(rows):
+    present_fields = [field for field in WORKLOAD_FIELDS if rows and field in rows[0]]
+    if not present_fields:
+        print_table(
+            "Workload Config Hint",
+            ("status",),
+            (("no workload config fields in trace",),),
+        )
+        return
+
+    counts = defaultdict(int)
+    for row in rows:
+        key = tuple(row.get(field, "") for field in present_fields)
+        counts[key] += 1
+
+    table_rows = [
+        list(key) + [count]
+        for key, count in sorted(counts.items(), key=lambda item: tuple(str(v) for v in item[0]))
+    ]
+    print_table("Workload Config Hint", tuple(present_fields) + ("count",), table_rows)
+
+
 def count_by(rows, field):
     counts = defaultdict(int)
     for row in rows:
@@ -605,6 +634,7 @@ def main():
 
     print(f"Trace: {args.trace}")
     print_overview(rows, len(raw_rows), len(analyzed_rows), deduplicated_count, filters)
+    print_workload_config_hint(rows)
     print_contention_summary(rows)
     print_table(
         "By initiator_id",

@@ -43,6 +43,29 @@ class traffic_generator                       	// traffic_generator
 
   public:
 
+  enum class target_pattern {
+    target201_only,
+    target202_only,
+    alternate_201_202,
+    current_default
+  };
+
+  enum class read_write_mode {
+    write_then_read,
+    read_only,
+    write_only
+  };
+
+  struct workload_config {
+    workload_config();
+
+    unsigned int        transaction_count;
+    sc_dt::uint64       address_stride;
+    target_pattern      target_pattern_mode;
+    read_write_mode     read_write_mode_setting;
+    sc_core::sc_time    initiator_start_offset;
+  };
+
 //=============================================================================
 ///  @fn traffic_generator
 //  
@@ -59,6 +82,15 @@ class traffic_generator                       	// traffic_generator
   , sc_dt::uint64       base_address_1    	  ///< first base address
   , sc_dt::uint64       base_address_2    	  ///< second base address
   , unsigned int        active_txn_count      ///< Max number of active transactions  
+  );
+
+  traffic_generator
+  ( sc_core::sc_module_name name            	///< module name for SC
+  , const unsigned int  ID               	    ///< initiator ID
+  , sc_dt::uint64       base_address_1    	  ///< first base address
+  , sc_dt::uint64       base_address_2    	  ///< second base address
+  , unsigned int        active_txn_count      ///< Max number of active transactions
+  , const workload_config& workload           ///< traffic workload knobs
   );
 
   //=============================================================================
@@ -171,11 +203,28 @@ class traffic_generator                       	// traffic_generator
   private:
 	  
   typedef tlm::tlm_generic_payload  *gp_ptr;   	    // pointer to a generic payload
+
+  void run_current_default_workload(void);
+  void run_pattern_workload(void);
+  void run_current_default_phase(tlm::tlm_command command,
+                                 sc_dt::uint64 base_address,
+                                 unsigned int count);
+  void issue_transaction(tlm::tlm_command command,
+                         sc_dt::uint64 mem_address);
+  sc_dt::uint64 pattern_address(unsigned int index,
+                                unsigned int address_count) const;
+  unsigned int write_count(void) const;
+  unsigned int read_count(void) const;
+  unsigned int target_phase_count(unsigned int count,
+                                  bool first_target) const;
+  bool verify_read_data(void) const;
+  bool is_second_target_address(sc_dt::uint64 mem_address) const;
   
   const unsigned int  m_ID;                   	    // initiator ID
 
   sc_dt::uint64       m_base_address_1;      	    // first base address
   sc_dt::uint64       m_base_address_2;       	    // second base address
+  workload_config     m_workload_config;           // configurable workload knobs
   
   tg_queue_c          m_transaction_queue;          // transaction queue
   
