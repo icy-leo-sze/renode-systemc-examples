@@ -224,6 +224,24 @@ Phase 5 的架构意义是：同一个 binary 和同一个 Robot 回归入口可
 workload 参数，从而比较 single initiator、dual initiator、target hotspot、
 address stride 等因素对 queue delay 和 contention ratio 的影响。
 
+## Expected Sweep Results
+
+| case_name | target_pattern | initiators | total_transactions | avg_delay_ns | avg_queue_delay_ns | contention_ratio_pct | interpretation |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| baseline_dual_initiator_current_default | both/current_default | 101 + 102 | 128 | 146.250 | 71.250 | 93.750 | Balanced dual-initiator baseline across target 201 and target 202. |
+| single_initiator_101_current_default | both/current_default | 101 only | 64 | 75.000 | 0.000 | 0.000 | Single-initiator baseline removes shared-target contention. |
+| dual_initiator_target201_hotspot | target201 | 101 + 102 | 128 | 199.062 | 99.062 | 99.219 | Slow target 201 hotspot amplifies queueing delay. |
+| dual_initiator_target202_hotspot | target202 | 101 + 102 | 128 | 99.531 | 49.531 | 99.219 | Fast target 202 hotspot has lower service and queueing cost. |
+| dual_initiator_stride_16_current_default | both/current_default | 101 + 102 | 128 | 146.250 | 71.250 | 93.750 | Stride changes address spacing, but current model has no cache/bank locality effect yet. |
+
+这个 sweep 已经能区分 single initiator、dual initiator、target 201 hotspot、
+target 202 hotspot 和 stride control。`avg_delay_ns` 由 target service delay 和
+queue delay 共同构成，Phase 5 的价值是把 target 本身服务成本与共享资源竞争成本拆开。
+target 201 hotspot 比 target 202 hotspot 慢，是因为 target 201 的 service delay 更高。
+stride 16 当前与 baseline 一样，这是一个有意保留的 control case，说明模型还没有引入
+cache line、bank conflict、burst locality 或 page locality。当前 lab 仍然只是一个
+minimal SystemC/TLM performance modeling lab，不是完整 NoC 模型。
+
 ## Workload Knobs
 
 当前 `traffic_generator` 可以通过构造参数配置 workload。第一版刻意把配置留在
