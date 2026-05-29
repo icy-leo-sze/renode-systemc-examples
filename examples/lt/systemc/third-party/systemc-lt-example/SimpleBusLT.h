@@ -62,6 +62,7 @@ public:
     }
     for (unsigned int i = 0; i < NR_OF_TARGETS; ++i) {
       initiator_socket[i].register_invalidate_direct_mem_ptr(this, &SimpleBusLT::invalidateDMIPointers, i);
+      m_target_busy_until[i] = sc_core::SC_ZERO_TIME;
     }
   }
 
@@ -108,20 +109,34 @@ public:
   {
     initiator_socket_type* decodeSocket;
     sc_dt::uint64 originalAddress = trans.get_address();
-    double startTimeNs = sc_core::sc_time_stamp().to_seconds() * 1e9;
+    sc_core::sc_time requestTime = sc_core::sc_time_stamp();
     sc_core::sc_time beforeDelay = t;
+    sc_core::sc_time currentTime = requestTime + beforeDelay;
+    double startTimeNs = currentTime.to_seconds() * 1e9;
     unsigned int portId = decode(originalAddress);
     assert(portId < NR_OF_TARGETS);
     decodeSocket = &initiator_socket[portId];
     trans.set_address(trans.get_address() & getAddressMask(portId));
     sc_dt::uint64 maskedAddress = trans.get_address();
 
+    sc_core::sc_time grantTime =
+        (m_target_busy_until[portId] > currentTime) ? m_target_busy_until[portId]
+                                                    : currentTime;
+    sc_core::sc_time queueDelay = grantTime - currentTime;
+    t += queueDelay;
+    sc_core::sc_time beforeTargetServiceDelay = t;
+
     (*decodeSocket)->b_transport(trans, t);
 
     sc_core::sc_time afterDelay = t;
+    sc_core::sc_time targetServiceDelay = afterDelay - beforeTargetServiceDelay;
     sc_core::sc_time transactionDelay = afterDelay - beforeDelay;
+    m_target_busy_until[portId] = grantTime + targetServiceDelay;
+
     writeLatencyTrace(SocketId, portId, trans, originalAddress, maskedAddress,
-                      startTimeNs, transactionDelay);
+                      startTimeNs, transactionDelay, requestTime, grantTime,
+                      queueDelay, targetServiceDelay,
+                      m_target_busy_until[portId]);
   }
 
   unsigned int transportDebug(int /*SocketId*/,
@@ -208,6 +223,8 @@ public:
   }
 
 private:
+  sc_core::sc_time m_target_busy_until[NR_OF_TARGETS];
+
   static int mapInitiatorId(int socketId)
   {
     switch (socketId) {
@@ -284,7 +301,8 @@ private:
   {
     return "initiator_id,target_id,command,address,data,start_time_ns,"
            "delay_ns,end_time_ns,decoded_port,masked_address,data_length,"
-           "response_status";
+           "response_status,request_time_ns,bus_grant_time_ns,queue_delay_ns,"
+           "target_service_delay_ns,total_delay_ns,target_busy_until_ns";
   }
 
   static bool checkLatencyTraceHeader(const std::filesystem::path& path,
@@ -336,7 +354,12 @@ private:
                                 sc_dt::uint64 originalAddress,
                                 sc_dt::uint64 maskedAddress,
                                 double startTimeNs,
-                                sc_core::sc_time transactionDelay)
+                                sc_core::sc_time transactionDelay,
+                                sc_core::sc_time requestTime,
+                                sc_core::sc_time grantTime,
+                                sc_core::sc_time queueDelay,
+                                sc_core::sc_time targetServiceDelay,
+                                sc_core::sc_time targetBusyUntil)
   {
     std::lock_guard<std::mutex> lock(latencyTraceMutex());
     const std::filesystem::path tracePath = latencyTracePath();
@@ -367,6 +390,11 @@ private:
 
     double delayNs = transactionDelay.to_seconds() * 1e9;
     double endTimeNs = startTimeNs + delayNs;
+    double requestTimeNs = requestTime.to_seconds() * 1e9;
+    double grantTimeNs = grantTime.to_seconds() * 1e9;
+    double queueDelayNs = queueDelay.to_seconds() * 1e9;
+    double targetServiceDelayNs = targetServiceDelay.to_seconds() * 1e9;
+    double targetBusyUntilNs = targetBusyUntil.to_seconds() * 1e9;
 
     trace << mapInitiatorId(socketId) << ','
           << mapTargetId(portId) << ','
@@ -385,7 +413,14 @@ private:
           << std::setfill('0') << static_cast<unsigned long long>(maskedAddress)
           << ','
           << std::dec << std::setfill(' ') << trans.get_data_length() << ','
-          << trans.get_response_string() << '\n';
+          << trans.get_response_string() << ','
+          << std::fixed << std::setprecision(3)
+          << requestTimeNs << ','
+          << grantTimeNs << ','
+          << queueDelayNs << ','
+          << targetServiceDelayNs << ','
+          << delayNs << ','
+          << targetBusyUntilNs << '\n';
   }
 
 };

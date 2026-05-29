@@ -22,9 +22,25 @@ REQUIRED_FIELDS = (
     "masked_address",
     "data_length",
     "response_status",
+    "request_time_ns",
+    "bus_grant_time_ns",
+    "queue_delay_ns",
+    "target_service_delay_ns",
+    "total_delay_ns",
+    "target_busy_until_ns",
 )
 
-FLOAT_FIELDS = ("start_time_ns", "delay_ns", "end_time_ns")
+FLOAT_FIELDS = (
+    "start_time_ns",
+    "delay_ns",
+    "end_time_ns",
+    "request_time_ns",
+    "bus_grant_time_ns",
+    "queue_delay_ns",
+    "target_service_delay_ns",
+    "total_delay_ns",
+    "target_busy_until_ns",
+)
 INT_FIELDS = ("data_length", "decoded_port")
 DEDUP_IDENTICAL_FIELDS = (
     "initiator_id",
@@ -39,6 +55,12 @@ DEDUP_IDENTICAL_FIELDS = (
     "decoded_port",
     "data_length",
     "response_status",
+    "request_time_ns",
+    "bus_grant_time_ns",
+    "queue_delay_ns",
+    "target_service_delay_ns",
+    "total_delay_ns",
+    "target_busy_until_ns",
 )
 
 
@@ -170,6 +192,24 @@ def format_hex(value):
     return f"0x{value:016X}"
 
 
+def average(values):
+    return sum(values) / len(values) if values else None
+
+
+def metric_values(rows, field):
+    return [row[field] for row in rows if row.get(field) is not None]
+
+
+def contended_rows(rows):
+    return [row for row in rows if (row.get("queue_delay_ns") or 0.0) > 0.0]
+
+
+def contention_ratio(rows):
+    if not rows:
+        return None
+    return 100.0 * len(contended_rows(rows)) / len(rows)
+
+
 def filter_rows(rows, args):
     initiators = {str(value) for value in args.initiator}
     excluded_initiators = {str(value) for value in args.exclude_initiator}
@@ -239,22 +279,29 @@ def active_filters(args):
 def summarize_numeric(rows, group_keys):
     groups = defaultdict(list)
     for row in rows:
-        delay = row.get("delay_ns")
-        if delay is None:
-            continue
-
         key = tuple(row.get(group_key, "") for group_key in group_keys)
-        groups[key].append(delay)
+        groups[key].append(row)
 
     summary_rows = []
-    for key, values in sorted(groups.items(), key=lambda item: tuple(str(v) for v in item[0])):
+    for key, group_rows in sorted(groups.items(), key=lambda item: tuple(str(v) for v in item[0])):
+        delays = metric_values(group_rows, "delay_ns")
+        queue_delays = metric_values(group_rows, "queue_delay_ns")
+        service_delays = metric_values(group_rows, "target_service_delay_ns")
+        total_delays = metric_values(group_rows, "total_delay_ns")
+
         summary_rows.append(
             list(key)
             + [
-                len(values),
-                format_number(sum(values) / len(values)),
-                format_number(min(values)),
-                format_number(max(values)),
+                len(group_rows),
+                format_number(average(delays)),
+                format_number(min(delays) if delays else None),
+                format_number(max(delays) if delays else None),
+                format_number(average(queue_delays)),
+                format_number(max(queue_delays) if queue_delays else None),
+                format_number(average(service_delays)),
+                format_number(average(total_delays)),
+                format_number(max(total_delays) if total_delays else None),
+                format_number(contention_ratio(group_rows)),
             ]
         )
 
@@ -285,12 +332,15 @@ def print_table(title, headers, rows):
 def print_overview(rows, raw_count, analyzed_count, deduplicated_count, filters):
     starts = [row["start_time_ns"] for row in rows if row["start_time_ns"] is not None]
     ends = [row["end_time_ns"] for row in rows if row["end_time_ns"] is not None]
-    delays = [row["delay_ns"] for row in rows if row["delay_ns"] is not None]
+    delays = metric_values(rows, "delay_ns")
+    queue_delays = metric_values(rows, "queue_delay_ns")
+    service_delays = metric_values(rows, "target_service_delay_ns")
+    total_delays = metric_values(rows, "total_delay_ns")
 
     first_start = min(starts) if starts else None
     last_end = max(ends) if ends else None
     observed_time = last_end - first_start if first_start is not None and last_end is not None else None
-    avg_delay = sum(delays) / len(delays) if delays else None
+    contended_count = len(contended_rows(rows))
 
     print_table(
         "Overview",
@@ -305,9 +355,41 @@ def print_overview(rows, raw_count, analyzed_count, deduplicated_count, filters)
             ("first_start_time_ns", format_number(first_start)),
             ("last_end_time_ns", format_number(last_end)),
             ("total_observed_time_ns", format_number(observed_time)),
-            ("avg_delay_ns", format_number(avg_delay)),
+            ("avg_delay_ns", format_number(average(delays))),
             ("min_delay_ns", format_number(min(delays) if delays else None)),
             ("max_delay_ns", format_number(max(delays) if delays else None)),
+            ("avg_queue_delay_ns", format_number(average(queue_delays))),
+            ("max_queue_delay_ns", format_number(max(queue_delays) if queue_delays else None)),
+            ("avg_target_service_delay_ns", format_number(average(service_delays))),
+            ("avg_total_delay_ns", format_number(average(total_delays))),
+            ("max_total_delay_ns", format_number(max(total_delays) if total_delays else None)),
+            ("contended_transactions", contended_count),
+            ("contention_ratio_pct", format_number(contention_ratio(rows))),
+        ),
+    )
+
+
+def print_contention_summary(rows):
+    queue_delays = metric_values(rows, "queue_delay_ns")
+    worst_row = max(rows, key=lambda row: row.get("queue_delay_ns") or 0.0)
+    contended_count = len(contended_rows(rows))
+
+    print_table(
+        "Contention Summary",
+        ("metric", "value"),
+        (
+            ("total_transactions", len(rows)),
+            ("contended_transactions", contended_count),
+            ("contention_ratio_pct", format_number(contention_ratio(rows))),
+            ("avg_queue_delay_ns", format_number(average(queue_delays))),
+            ("max_queue_delay_ns", format_number(max(queue_delays) if queue_delays else None)),
+            ("worst_queue_initiator_id", worst_row.get("initiator_id", "")),
+            ("worst_queue_target_id", worst_row.get("target_id", "")),
+            ("worst_queue_command", worst_row.get("command", "")),
+            ("worst_queue_address", worst_row.get("address", "")),
+            ("worst_queue_start_time_ns", format_number(worst_row.get("start_time_ns"))),
+            ("worst_queue_delay_ns", format_number(worst_row.get("queue_delay_ns"))),
+            ("worst_queue_total_delay_ns", format_number(worst_row.get("total_delay_ns"))),
         ),
     )
 
@@ -364,6 +446,9 @@ def sanity_row(row):
         format_number(row.get("start_time_ns")),
         format_number(row.get("end_time_ns")),
         format_number(row.get("delay_ns")),
+        format_number(row.get("queue_delay_ns")),
+        format_number(row.get("target_service_delay_ns")),
+        format_number(row.get("total_delay_ns")),
         row.get("response_status", ""),
     ]
 
@@ -381,6 +466,9 @@ def print_sanity_block(title, rows):
             "start_time_ns",
             "end_time_ns",
             "delay_ns",
+            "queue_delay_ns",
+            "target_service_delay_ns",
+            "total_delay_ns",
             "response_status",
         ),
         [sanity_row(row) for row in rows[:20]],
@@ -413,6 +501,31 @@ def print_sanity_checks(rows):
             "Sanity: delay_ns < 0",
             [row for row in rows if row.get("delay_ns") is not None and row["delay_ns"] < 0],
         ),
+        (
+            "Sanity: total_delay_ns != queue_delay_ns + target_service_delay_ns",
+            [
+                row
+                for row in rows
+                if row.get("total_delay_ns") is not None
+                and row.get("queue_delay_ns") is not None
+                and row.get("target_service_delay_ns") is not None
+                and abs(
+                    row["total_delay_ns"]
+                    - (row["queue_delay_ns"] + row["target_service_delay_ns"])
+                )
+                > 0.001
+            ],
+        ),
+        (
+            "Sanity: delay_ns != total_delay_ns",
+            [
+                row
+                for row in rows
+                if row.get("delay_ns") is not None
+                and row.get("total_delay_ns") is not None
+                and abs(row["delay_ns"] - row["total_delay_ns"]) > 0.001
+            ],
+        ),
     )
 
     for title, failing_rows in checks:
@@ -433,6 +546,9 @@ def timeline_row(row):
         row.get("masked_address", ""),
         row.get("data", ""),
         format_number(row.get("delay_ns")),
+        format_number(row.get("queue_delay_ns")),
+        format_number(row.get("target_service_delay_ns")),
+        format_number(row.get("total_delay_ns")),
         row.get("response_status", ""),
     ]
 
@@ -450,6 +566,9 @@ def print_timeline(rows, title):
             "masked_address",
             "data",
             "delay_ns",
+            "queue_delay_ns",
+            "target_service_delay_ns",
+            "total_delay_ns",
             "response_status",
         ),
         [timeline_row(row) for row in rows],
@@ -486,14 +605,40 @@ def main():
 
     print(f"Trace: {args.trace}")
     print_overview(rows, len(raw_rows), len(analyzed_rows), deduplicated_count, filters)
+    print_contention_summary(rows)
     print_table(
         "By initiator_id",
-        ("initiator_id", "count", "avg_delay_ns", "min_delay_ns", "max_delay_ns"),
+        (
+            "initiator_id",
+            "count",
+            "avg_delay_ns",
+            "min_delay_ns",
+            "max_delay_ns",
+            "avg_queue_delay_ns",
+            "max_queue_delay_ns",
+            "avg_service_delay_ns",
+            "avg_total_delay_ns",
+            "max_total_delay_ns",
+            "contention_ratio_pct",
+        ),
         summarize_numeric(rows, ("initiator_id",)),
     )
     print_table(
         "By target_id, command",
-        ("target_id", "command", "count", "avg_delay_ns", "min_delay_ns", "max_delay_ns"),
+        (
+            "target_id",
+            "command",
+            "count",
+            "avg_delay_ns",
+            "min_delay_ns",
+            "max_delay_ns",
+            "avg_queue_delay_ns",
+            "max_queue_delay_ns",
+            "avg_service_delay_ns",
+            "avg_total_delay_ns",
+            "max_total_delay_ns",
+            "contention_ratio_pct",
+        ),
         summarize_numeric(rows, ("target_id", "command")),
     )
     print_table(
@@ -506,6 +651,12 @@ def main():
             "avg_delay_ns",
             "min_delay_ns",
             "max_delay_ns",
+            "avg_queue_delay_ns",
+            "max_queue_delay_ns",
+            "avg_service_delay_ns",
+            "avg_total_delay_ns",
+            "max_total_delay_ns",
+            "contention_ratio_pct",
         ),
         summarize_numeric(rows, ("initiator_id", "target_id", "command")),
     )
