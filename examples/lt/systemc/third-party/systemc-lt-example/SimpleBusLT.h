@@ -30,6 +30,7 @@
 #include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <string>
 #include <system_error>
 
 #include "tlm_utils/simple_target_socket.h"
@@ -113,13 +114,14 @@ public:
     assert(portId < NR_OF_TARGETS);
     decodeSocket = &initiator_socket[portId];
     trans.set_address(trans.get_address() & getAddressMask(portId));
+    sc_dt::uint64 maskedAddress = trans.get_address();
 
     (*decodeSocket)->b_transport(trans, t);
 
     sc_core::sc_time afterDelay = t;
     sc_core::sc_time transactionDelay = afterDelay - beforeDelay;
-    writeLatencyTrace(SocketId, portId, trans, originalAddress, startTimeNs,
-                      transactionDelay);
+    writeLatencyTrace(SocketId, portId, trans, originalAddress, maskedAddress,
+                      startTimeNs, transactionDelay);
   }
 
   unsigned int transportDebug(int /*SocketId*/,
@@ -278,15 +280,40 @@ private:
     return path;
   }
 
-  static bool fileHasContent(const std::filesystem::path& path)
+  static const char* latencyTraceHeader()
   {
+    return "initiator_id,target_id,command,address,data,start_time_ns,"
+           "delay_ns,end_time_ns,decoded_port,masked_address,data_length,"
+           "response_status";
+  }
+
+  static bool checkLatencyTraceHeader(const std::filesystem::path& path,
+                                      bool& writeHeader)
+  {
+    writeHeader = false;
     std::error_code error;
     if (!std::filesystem::exists(path, error) || error) {
-      return false;
+      writeHeader = true;
+      return true;
     }
 
     const auto size = std::filesystem::file_size(path, error);
-    return !error && size > 0;
+    if (error || size == 0) {
+      writeHeader = true;
+      return true;
+    }
+
+    std::ifstream trace(path);
+    std::string header;
+    std::getline(trace, header);
+    if (header != latencyTraceHeader()) {
+      std::cerr << "[latency_csv] existing CSV header does not match current "
+                   "schema; remove "
+                << path << " before rerunning" << std::endl;
+      return false;
+    }
+
+    return true;
   }
 
   static bool ensureLatencyTraceDirectory(const std::filesystem::path& tracePath)
@@ -307,6 +334,7 @@ private:
                                 unsigned int portId,
                                 transaction_type& trans,
                                 sc_dt::uint64 originalAddress,
+                                sc_dt::uint64 maskedAddress,
                                 double startTimeNs,
                                 sc_core::sc_time transactionDelay)
   {
@@ -316,7 +344,11 @@ private:
       return;
     }
 
-    bool writeHeader = !fileHasContent(tracePath);
+    bool writeHeader = false;
+    if (!checkLatencyTraceHeader(tracePath, writeHeader)) {
+      return;
+    }
+
     std::ofstream trace(tracePath, std::ios::out | std::ios::app);
     if (!trace) {
       std::cerr << "[latency_csv] failed to open " << tracePath << std::endl;
@@ -330,8 +362,7 @@ private:
     }
 
     if (writeHeader) {
-      trace << "initiator_id,target_id,command,address,data,start_time_ns,"
-               "delay_ns,end_time_ns\n";
+      trace << latencyTraceHeader() << '\n';
     }
 
     double delayNs = transactionDelay.to_seconds() * 1e9;
@@ -348,7 +379,13 @@ private:
           << std::dec << std::setfill(' ') << std::fixed << std::setprecision(3)
           << startTimeNs << ','
           << delayNs << ','
-          << endTimeNs << '\n';
+          << endTimeNs << ','
+          << portId << ','
+          << "0x" << std::uppercase << std::hex << std::setw(16)
+          << std::setfill('0') << static_cast<unsigned long long>(maskedAddress)
+          << ','
+          << std::dec << std::setfill(' ') << trans.get_data_length() << ','
+          << trans.get_response_string() << '\n';
   }
 
 };
